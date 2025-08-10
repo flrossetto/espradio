@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"tinygo.org/x/drivers/espradio"
+	"tinygo.org/x/espradio"
 )
 
 func main() {
