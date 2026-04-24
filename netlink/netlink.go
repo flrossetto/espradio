@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"runtime"
 	"sync"
 	"time"
 
@@ -128,6 +127,7 @@ func (n *Esplink) NetConnect(params *nl.ConnectParams) error {
 				ClosingTimeout:     2 * time.Second,
 			},
 		})
+
 		n.berkeley = *xnet.NewBerkeleyStack(gostack.Socket)
 		go handleStack(espstack)
 	})
@@ -310,7 +310,6 @@ func handleStack(stack *espradio.Stack) {
 		send, recv, _ := stack.RecvAndSend()
 		if send == 0 && recv == 0 {
 			time.Sleep(pollTime)
-			runtime.Gosched()
 		}
 	}
 }

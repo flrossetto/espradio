@@ -80,11 +80,10 @@ func (stack *Stack) Hostname() string {
 // RecvAndSend polls the device for received frames and sends any pending
 // outgoing frames. Returns the number of bytes sent and received.
 func (stack *Stack) RecvAndSend() (send, recv int, err error) {
-	gotRecv, errrecv := stack.dev.EthPoll(stack.rxtxBuf)
-	if gotRecv {
-		recv = 1 // At least one frame was processed.
+	recv, errrecv := stack.dev.EthPoll(stack.rxtxBuf)
+	if pcapdebug && recv > 0 {
+		printPacket("IN", stack.rxtxBuf[:recv])
 	}
-
 	send, err = stack.s.EgressEthernet(stack.rxtxBuf)
 	if err != nil {
 		return send, recv, err
@@ -93,6 +92,8 @@ func (stack *Stack) RecvAndSend() (send, recv int, err error) {
 	}
 	if send == 0 {
 		return send, recv, err
+	} else if pcapdebug {
+		printPacket("OUT", stack.rxtxBuf[:send])
 	}
 
 	err = stack.dev.SendEthFrame(stack.rxtxBuf[:send])
