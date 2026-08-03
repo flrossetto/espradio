@@ -8,13 +8,13 @@ package main
 
 import (
 	_ "embed"
-	"io"
-	"net/http"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
-	"tinygo.org/x/drivers/netdev"
+	"github.com/soypat/lneto/http/httphi"
+	"github.com/soypat/lneto/http/httpraw"
 	"tinygo.org/x/espradio"
 	link "tinygo.org/x/espradio/netlink"
 )
@@ -28,7 +28,7 @@ var sixlinesHTML string
 var (
 	ssid     string
 	password string
-	port     string = ":80"
+	port     uint16 = 80
 )
 
 const apIP = "192.168.4.1"
@@ -37,11 +37,10 @@ func main() {
 	// wait a bit for serial
 	time.Sleep(2 * time.Second)
 
-	lnk := link.Esplink{}
-	netdev.UseNetdev(&lnk)
+	lnk := &link.Esplink{}
 
 	println("Starting AP...")
-	err := lnk.NetConnectAP(link.APConnectParams{
+	failIfErr("starting AP", lnk.NetConnectAP(link.APConnectParams{
 		APConfig: espradio.APConfig{
 			SSID:     ssid,
 			Password: password,
@@ -52,11 +51,9 @@ func main() {
 		MaxUDPPorts:      2,
 		MaxTCPPorts:      4,
 		PassivePeers:     64,
-	})
-	if err != nil {
-		failure("could not start AP: " + err.Error())
-	}
+	}))
 
+	var http httphi.MuxSlice
 	http.Handle("/", logRequest(root))
 	http.Handle("/hello", logRequest(hello))
 	http.Handle("/cnt", logRequest(cnt))
@@ -64,68 +61,79 @@ func main() {
 	http.Handle("/off", logRequest(LED_OFF))
 	http.Handle("/on", logRequest(LED_ON))
 
-	println("HTTP server listening on http://" + apIP + port)
-	err = http.ListenAndServe(apIP+port, nil)
-	if err != nil {
-		failure("http.ListenAndServe: " + err.Error())
+	const maxConns, httpMemoryPerConn = 4, 2048
+	var router httphi.Router
+	cfg := httphi.DefaultRouterConfig(maxConns, httpMemoryPerConn, http.MaxPathValues())
+	failIfErr("configuring Router", router.Configure(&http, cfg))
+	defer router.Shutdown() // Despawns goroutines.
+	addr, err := lnk.Addr()
+	failIfErr("Esplink.Addr()", err)
+	print("Hosting webserver on http://", addr.String(), ":", port, "\n")
+	err = lnk.ListenAndServe(&router, port) // Blocks as long as Router can serve connections.
+	failIfErr("Esplink.ListenAndServe", err)
+}
+
+func logRequest(h httphi.HandlerFunc) httphi.HandlerFunc {
+	return func(exch *httphi.Exchange) {
+		println(exch.RequestMethod().String(), " ", exch.MuxPattern())
+		h(exch)
 	}
 }
 
-func logRequest(h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		println(r.Method, r.URL.Path)
-		h(w, r)
-	})
+func root(exch *httphi.Exchange) {
+	exch.RespondString(httphi.StatusOK, "text/html", indexHTML)
 }
 
-func root(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, indexHTML)
+func sixlines(exch *httphi.Exchange) {
+	exch.RespondString(httphi.StatusOK, "text/html", sixlinesHTML)
 }
 
-func sixlines(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, sixlinesHTML)
-}
+const textplain = "text/plain; charset=UTF-8"
 
-func LED_ON(w http.ResponseWriter, r *http.Request) {
+func LED_ON(exch *httphi.Exchange) {
 	setLED(true)
-	w.Header().Set(`Content-Type`, `text/plain; charset=UTF-8`)
-	io.WriteString(w, "led.High()")
+	exch.RespondString(httphi.StatusOK, textplain, "led.High()")
 }
 
-func LED_OFF(w http.ResponseWriter, r *http.Request) {
+func LED_OFF(exch *httphi.Exchange) {
 	setLED(false)
-	w.Header().Set(`Content-Type`, `text/plain; charset=UTF-8`)
-	io.WriteString(w, "led.Low()")
+	exch.RespondString(httphi.StatusOK, textplain, "led.Low()")
 }
 
-func hello(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(`Content-Type`, `text/plain; charset=UTF-8`)
-	io.WriteString(w, "hello")
+func hello(exch *httphi.Exchange) {
+	exch.RespondString(httphi.StatusOK, textplain, "hello")
 }
 
-var counter int
+var counter atomic.Int64
 
-func cnt(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	if r.Method == "POST" {
-		c := r.Form.Get("cnt")
-		if c != "" {
-			i64, _ := strconv.ParseInt(c, 0, 0)
-			counter = int(i64)
+func cnt(exch *httphi.Exchange) {
+	var scratch [64]byte
+	switch exch.RequestMethod() {
+	case httphi.MethPost: // POST
+		var form httpraw.Form
+		form.Reset(scratch[:], 2) // 2 query values max.
+		const parseURL, prioritizeURL = true, false
+		err := exch.RequestParseForm(&form, parseURL, prioritizeURL)
+		if err != nil {
+			exch.Respond(httphi.StatusInternalServerError, "", nil)
+			return
+		}
+		c := form.Get("cnt")
+		if len(c) > 0 {
+			i64, _ := strconv.ParseInt(string(c), 0, 0)
+			counter.Store(i64)
+			println("set counter", i64)
 		}
 	}
-
-	w.Header().Set(`Content-Type`, `application/json`)
-	io.WriteString(w, `{"cnt": `)
-	io.WriteString(w, strconv.Itoa(counter))
-	io.WriteString(w, `}`)
+	json := append(scratch[:0], `{"cnt": `...)
+	json = strconv.AppendInt(json, counter.Load(), 10)
+	json = append(json, '}')
+	exch.Respond(httphi.StatusOK, "application/json", json)
 }
 
-func failure(msg string) {
-	for {
-		println("failure:", msg)
+func failIfErr(action string, err error) {
+	for err != nil {
+		println("fail " + action + ": " + err.Error())
 		time.Sleep(1 * time.Second)
 	}
 }
