@@ -39,6 +39,12 @@ func main() {
 		for _, ap := range aps {
 			println("AP:", ap.SSID, "RSSI", ap.RSSI)
 		}
+
+		// Driver counters.  Most of these count something being dropped, so a
+		// non-zero value is the only evidence it happened.
+		var stats espradio.Stats
+		espradio.ReadStats(&stats)
+		stats.Print()
 		println()
 
 		time.Sleep(10 * time.Second)
