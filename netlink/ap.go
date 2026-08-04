@@ -145,7 +145,7 @@ func (n *Esplink) NetConnectAP(params APConnectParams) error {
 		println("Esplink NetConnectAP: stack started, addr:", params.StaticAddr.String())
 	}
 	n.stackloop.Do(func() {
-		gostack := n.netstack.LnetoStack().StackGo(pollBackoff, xnet.StackGoConfig{
+		n.gostack = n.netstack.LnetoStack().StackGo(pollBackoff, xnet.StackGoConfig{
 			ListenerPoolConfig: xnet.TCPPoolConfig{
 				PoolSize:           2,
 				QueueSize:          4,
@@ -156,7 +156,7 @@ func (n *Esplink) NetConnectAP(params APConnectParams) error {
 				NewBackoff:         func() lneto.BackoffStrategy { return pollBackoff },
 			},
 		})
-		n.berkeley = *xnet.NewBerkeleyStack(gostack.Socket)
+		n.berkeley = *xnet.NewBerkeleyStack(n.gostack.Socket)
 		go handleStack(espstack)
 	})
 	return nil

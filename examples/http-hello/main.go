@@ -19,7 +19,7 @@ func main() {
 	link := &link.Esplink{}
 	netdev.UseNetdev(link)
 
-	println("Connecting to WiFi...")
+	println("Connecting to WiFi...", ssid)
 	failIfErr("connect", link.NetConnect(&nl.ConnectParams{
 		Ssid:       ssid,
 		Passphrase: password,
