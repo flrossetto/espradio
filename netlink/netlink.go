@@ -33,6 +33,52 @@ type Esplink struct {
 
 	// ArenaPoolSize overrides the default arena pool size (bytes). Zero uses target default.
 	ArenaPoolSize int
+
+	// MaxUDPPorts caps simultaneous UDP ports. Zero uses the default (2).
+	MaxUDPPorts int
+	// MaxTCPPorts caps simultaneous TCP ports — this is a single shared
+	// table for BOTH listeners and outbound dials, so a caller that keeps
+	// a listener open (e.g. for re-provisioning) while also dialing out
+	// needs at least 2. Zero uses the default (1).
+	MaxTCPPorts int
+	// PassivePeers limits how many subnet peers the stack passively learns
+	// MAC addresses for. Zero uses the default (64).
+	PassivePeers int
+
+	// TCPPoolSize is the max number of active incoming TCP connections in
+	// the listener pool. Zero uses the default (4).
+	TCPPoolSize int
+	// TCPQueueSize is the TX/RX packet queue depth per TCP connection.
+	// Zero uses the default (4).
+	TCPQueueSize int
+	// TCPTxBufSize is the per-connection TX byte buffer size. Zero uses
+	// the default (4096).
+	TCPTxBufSize int
+	// TCPRxBufSize is the per-connection RX byte buffer size — must fit at
+	// least one incoming TLS handshake flight (ServerHello+Certificate) for
+	// TLS connections to work. Zero uses the default (1024).
+	TCPRxBufSize int
+	// TCPEstablishedTimeout bounds how long an acquired TCP connection has
+	// to reach the established state before the pool closes it. Zero uses
+	// the default (2s).
+	TCPEstablishedTimeout time.Duration
+	// TCPClosingTimeout bounds how long a closing TCP connection has to
+	// fully close before the pool aborts it. Zero uses the default (2s).
+	TCPClosingTimeout time.Duration
+}
+
+func orDefaultInt(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+func orDefaultDuration(v, def time.Duration) time.Duration {
+	if v == 0 {
+		return def
+	}
+	return v
 }
 
 func (n *Esplink) rstack() xnet.StackRetrying {
@@ -101,9 +147,9 @@ func (n *Esplink) NetConnect(params *nl.ConnectParams) error {
 	}
 	espstack, err := espradio.NewStack(nd, espradio.StackConfig{
 		Hostname:     params.Hostname,
-		MaxUDPPorts:  2,
-		MaxTCPPorts:  1,
-		PassivePeers: 64,
+		MaxUDPPorts:  orDefaultInt(n.MaxUDPPorts, 2),
+		MaxTCPPorts:  orDefaultInt(n.MaxTCPPorts, 1),
+		PassivePeers: orDefaultInt(n.PassivePeers, 64),
 	})
 	if err != nil {
 		if debug {
@@ -125,12 +171,12 @@ func (n *Esplink) NetConnect(params *nl.ConnectParams) error {
 		// Start stack goroutine once.
 		n.gostack = n.netstack.LnetoStack().StackGo(pollBackoff, xnet.StackGoConfig{
 			ListenerPoolConfig: xnet.TCPPoolConfig{
-				PoolSize:           4,
-				QueueSize:          4,
-				TxBufSize:          4096,
-				RxBufSize:          1024,
-				EstablishedTimeout: 2 * time.Second,
-				ClosingTimeout:     2 * time.Second,
+				PoolSize:           uint16(orDefaultInt(n.TCPPoolSize, 4)),
+				QueueSize:          orDefaultInt(n.TCPQueueSize, 4),
+				TxBufSize:          orDefaultInt(n.TCPTxBufSize, 4096),
+				RxBufSize:          orDefaultInt(n.TCPRxBufSize, 1024),
+				EstablishedTimeout: orDefaultDuration(n.TCPEstablishedTimeout, 2*time.Second),
+				ClosingTimeout:     orDefaultDuration(n.TCPClosingTimeout, 2*time.Second),
 				NewBackoff:         func() lneto.BackoffStrategy { return pollBackoff },
 			},
 		})
