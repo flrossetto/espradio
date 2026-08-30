@@ -33,6 +33,10 @@ type Esplink struct {
 
 	// ArenaPoolSize overrides the default arena pool size (bytes). Zero uses target default.
 	ArenaPoolSize int
+	// TXPowerDBm sets the max TX power for the connect handshake. Zero
+	// scans for the SSID's RSSI and picks a power from that; a nonzero
+	// value is used as-is.
+	TXPowerDBm int8
 }
 
 func (n *Esplink) rstack() xnet.StackRetrying {
@@ -75,8 +79,9 @@ func (n *Esplink) NetConnect(params *nl.ConnectParams) error {
 		println("Esplink NetConnect: connecting to WiFi")
 	}
 	err = espradio.Connect(espradio.STAConfig{
-		SSID:     params.Ssid,
-		Password: params.Passphrase,
+		SSID:       params.Ssid,
+		Password:   params.Passphrase,
+		TXPowerDBm: n.TXPowerDBm,
 	})
 	if err != nil {
 		if debug {

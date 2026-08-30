@@ -73,6 +73,10 @@ type AccessPoint struct {
 type STAConfig struct {
 	SSID     string
 	Password string
+	// TXPowerDBm sets the max TX power for the connect handshake. Zero
+	// scans for SSID's RSSI and picks a power from that; a nonzero value
+	// is used as-is.
+	TXPowerDBm int8
 }
 
 // ConnectResult represents the result of a connection attempt.
@@ -527,6 +531,23 @@ func enableFailed(err error) error {
 	return err
 }
 
+// InitArena allocates the WiFi blob's arena pool, safe to call before
+// Enable. --wrap=malloc routes every C allocation through this arena and
+// returns NULL until it exists, so any C code that mallocs before Enable
+// (e.g. the FATFS/SD-card driver reading WiFi credentials off disk) needs
+// this called first. Idempotent: only the first call, from InitArena or
+// Enable, does anything.
+func InitArena(poolSize int) {
+	if arenaPool != nil {
+		return
+	}
+	if poolSize <= 0 {
+		poolSize = arenaPoolSize
+	}
+	arenaPool = makeArenaPool(poolSize)
+	C.espradio_arena_init((*C.uint8_t)(unsafe.Pointer(&arenaPool[0])), C.size_t(len(arenaPool)))
+}
+
 // Enable and configure the radio for WiFi.
 //
 // Enable is not idempotent and returns ErrAlreadyEnabled on a second call.  If an
@@ -544,19 +565,7 @@ func Enable(config Config) error {
 	// custom section the runtime does not zero.
 	C.espradio_isr_tables_init()
 
-	// Allocate the arena pool from the Go heap and hand it to C -- but only if
-	// nobody has already done so.  espradio_arena_init re-lays the whole pool as
-	// one free block, so calling it when BLEInit got there first would reset the
-	// heap underneath the live BT controller.  BLEInit already guards this the
-	// same way.
-	if arenaPool == nil {
-		poolSize := arenaPoolSize
-		if config.ArenaPoolSize > 0 {
-			poolSize = config.ArenaPoolSize
-		}
-		arenaPool = makeArenaPool(poolSize)
-		C.espradio_arena_init((*C.uint8_t)(unsafe.Pointer(&arenaPool[0])), C.size_t(len(arenaPool)))
-	}
+	InitArena(config.ArenaPoolSize)
 
 	if isrKick == nil {
 		startSchedTicker()
@@ -884,6 +893,27 @@ const (
 	scanPassiveMs   = 500
 )
 
+// SetUnmaskIntervalUs sets the minimum spacing, in microseconds, between
+// re-enables of the WiFi CPU interrupt.
+//
+// Why this exists: on the classic ESP32 (and S3), the real hardware WiFi
+// interrupt handler only masks the line and wakes the scheduler; a scheduler
+// pass runs the blob's ISR and then unmasks. If the interrupt's underlying
+// source is still asserting when that happens — which it very often is,
+// since it is level-triggered and the blob services it in bounded chunks —
+// it refires immediately. Left uncapped, that measured ~27,000 scheduler
+// passes/second on an otherwise-idle radio; each pass masks the interrupt,
+// restores ROM pointers, runs the blob ISR, and drains three queues, so this
+// is real, sustained CPU work — a plausible driver of reports of the board
+// running warm even at idle. The 1000us default (esp32/isr.c) caps that to
+// ~1kHz, a >20x reduction already in effect. Raising the interval trades
+// WiFi responsiveness/throughput for less CPU time spent servicing it —
+// still bounded correctly, since the interrupt source stays pending (not
+// lost) between unmasks.
+func SetUnmaskIntervalUs(us uint32) {
+	C.espradio_set_unmask_interval_us(C.uint32_t(us))
+}
+
 // Scan performs a single Wi-Fi scan pass and returns the list of discovered access points.
 func Scan() ([]AccessPoint, error) {
 	C.espradio_ensure_osi_ptr()
@@ -957,9 +987,68 @@ var (
 	connectResult chan ConnectResult
 )
 
+func dbmToQuarterDBm(dbm int8) C.int8_t {
+	q := int32(dbm) * 4
+	if q < 8 {
+		q = 8
+	}
+	if q > 84 {
+		q = 84
+	}
+	return C.int8_t(q)
+}
+
+func rssiToDBm(rssi int) int8 {
+	switch {
+	case rssi >= -40:
+		return 8
+	case rssi >= -50:
+		return 10
+	case rssi >= -60:
+		return 12
+	case rssi >= -70:
+		return 14
+	case rssi >= -80:
+		return 17
+	default:
+		return 20
+	}
+}
+
+func txPowerDBm(ssid string, dbm int8) int8 {
+	if dbm != 0 {
+		if pcapdebug {
+			println("espradio: TX power fixed at", dbm, "dBm")
+		}
+		return dbm
+	}
+	aps, err := Scan()
+	if err != nil {
+		if pcapdebug {
+			println("espradio: TX power scan failed, defaulting to 14 dBm")
+		}
+		return 14
+	}
+	for _, ap := range aps {
+		if ap.SSID == ssid {
+			power := rssiToDBm(ap.RSSI)
+			if pcapdebug {
+				println("espradio: TX power", power, "dBm for", ssid, "rssi", ap.RSSI)
+			}
+			return power
+		}
+	}
+	if pcapdebug {
+		println("espradio: TX power scan missed", ssid, ", defaulting to 8 dBm")
+	}
+	return 8
+}
+
 // Connect configures STA credentials and initiates association.
 // Blocks until CONNECTED, DISCONNECTED or timeout.
 func Connect(cfg STAConfig) error {
+	C.esp_wifi_set_max_tx_power(dbmToQuarterDBm(txPowerDBm(cfg.SSID, cfg.TXPowerDBm)))
+
 	connectMu.Lock()
 	connectResult = make(chan ConnectResult, 1)
 	connectMu.Unlock()
